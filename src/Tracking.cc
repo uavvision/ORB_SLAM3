@@ -604,7 +604,7 @@ void Tracking::newParameterLoader(Settings *settings) {
     Sophus::SE3f Tbc = settings->Tbc();
     mInsertKFsLost = settings->insertKFsWhenLost();
     mImuFreq = settings->imuFrequency();
-    mImuPer = 0.001; //1.0 / (double) mImuFreq;     //TODO: ESTO ESTA BIEN?
+    mImuPer = 1.0 / (double) mImuFreq;     //TODO: ESTO ESTA BIEN?
     float Ng = settings->noiseGyro();
     float Na = settings->noiseAcc();
     float Ngw = settings->gyroWalk();
@@ -2149,6 +2149,9 @@ void Tracking::Track()
                 if(!pCurrentMap->isImuInitialized() || !pCurrentMap->GetIniertialBA2())
                 {
                     cout << "IMU is not or recently initialized. Reseting active map..." << endl;
+                    cout << "pCurrentMap->GetIniertialBA2():  " << pCurrentMap->GetIniertialBA2() << endl;
+                    cout << "pCurrentMap->isImuInitialized():  " << pCurrentMap->isImuInitialized() << endl;
+
                     mpSystem->ResetActiveMap();
                 }
 
@@ -2580,6 +2583,7 @@ void Tracking::CreateInitialMapMonocular()
     Optimizer::GlobalBundleAdjustemnt(mpAtlas->GetCurrentMap(),20);
 
     float medianDepth = pKFini->ComputeSceneMedianDepth(2);
+    Verbose::PrintMess("Median Depth : " + to_string(medianDepth) + "", Verbose::VERBOSITY_QUIET);
     float invMedianDepth;
     if(mSensor == System::IMU_MONOCULAR)
         invMedianDepth = 4.0f/medianDepth; // 4.0f

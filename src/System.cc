@@ -460,8 +460,18 @@ Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const double &timestamp, 
     }
 
     if (mSensor == System::IMU_MONOCULAR)
+    {
+        // std::cout << "Num imu measurements: " << vImuMeas.size() << std::endl;
         for(size_t i_imu = 0; i_imu < vImuMeas.size(); i_imu++)
+        {
+            // std::cout << "Grabbing imu measurement: "
+            //           << "Acc: " << vImuMeas[i_imu].a << " \n "
+            //           << "Gyro: " << vImuMeas[i_imu].w << " \n "
+            //           << "T: " << vImuMeas[i_imu].t << std::endl;
+
             mpTracker->GrabImuData(vImuMeas[i_imu]);
+        }
+    }
 
     Sophus::SE3f Tcw = mpTracker->GrabImageMonocular(imToFeed,timestamp,filename);
 
@@ -472,8 +482,6 @@ Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const double &timestamp, 
 
     return Tcw;
 }
-
-
 
 void System::ActivateLocalizationMode()
 {
@@ -647,12 +655,13 @@ void System::SaveKeyFrameTrajectoryTUM(const string &filename)
 
         if(pKF->isBad())
             continue;
+        float medianDepth = pKF->ComputeSceneMedianDepth(2);
 
         Sophus::SE3f Twc = pKF->GetPoseInverse();
         Eigen::Quaternionf q = Twc.unit_quaternion();
         Eigen::Vector3f t = Twc.translation();
         f << setprecision(6) << pKF->mTimeStamp << setprecision(7) << " " << t(0) << " " << t(1) << " " << t(2)
-          << " " << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << endl;
+          << " " << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << " " << medianDepth << endl;
 
     }
 
