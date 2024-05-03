@@ -59,8 +59,15 @@
 #include <vector>
 #include <iostream>
 
+#include <chrono>
 #include "ORBextractor.h"
 
+#include <arm_neon.h>
+#include <thread>
+
+
+#define USE_NEON_ORB 1
+#define USE_THREADED_ORB 1
 
 using namespace cv;
 using namespace std;
@@ -109,14 +116,22 @@ namespace ORB_SLAM3
                                      uchar* desc)
     {
         float angle = (float)kpt.angle*factorPI;
-        float a = (float)cos(angle), b = (float)sin(angle);
+        __fp16 a = (float)cos(angle), b = (float)sin(angle);
 
         const uchar* center = &img.at<uchar>(cvRound(kpt.pt.y), cvRound(kpt.pt.x));
         const int step = (int)img.step;
 
+        auto mulfp16 = [&](__fp16 a, __fp16 b) -> __fp16
+        {
+            float16x8_t v_a = vdupq_n_f16(a);
+            float16x8_t v_b = vdupq_n_f16(b);
+            float16x8_t v_c = vmulq_f16(v_a, v_b);
+
+            return vgetq_lane_f16(v_c, 0);
+        };
 #define GET_VALUE(idx) \
-        center[cvRound(pattern[idx].x*b + pattern[idx].y*a)*step + \
-               cvRound(pattern[idx].x*a - pattern[idx].y*b)]
+        center[cvRound(mulfp16(pattern[idx].x,b) + mulfp16(pattern[idx].y,a))*step + \
+               cvRound(mulfp16(pattern[idx].x,a) - mulfp16(pattern[idx].y,b))]
 
 
         for (int i = 0; i < 32; ++i, pattern += 16)
@@ -143,6 +158,80 @@ namespace ORB_SLAM3
         }
 
 #undef GET_VALUE
+    }
+
+    static void computeOrbDescriptorNEON(const KeyPoint& kpt,
+                                         const Mat& img, 
+                                         const vector<__fp16>& patternx,
+                                         const vector<__fp16>& patterny,
+                                         uchar* desc)
+    {
+        float angle = (float)kpt.angle*factorPI;
+        __fp16 a = (float)cos(angle), b = (float)sin(angle);
+
+        const uchar* center = &img.at<uchar>(cvRound(kpt.pt.y), cvRound(kpt.pt.x));
+        const int step = (int)img.step;
+
+        const __fp16* px = patternx.data();
+        const __fp16* py = patterny.data();
+
+        auto calculateHalfByte = [&](uint id, uint16_t output_offset, uint8x8_t& outputA, uint8x8_t& outputB)
+        {
+            // load pattern
+            float16x8_t v_x = vld1q_f16(px);
+            float16x8_t v_y = vld1q_f16(py);
+
+            // load scalars
+            float16x8_t s_a = vdupq_n_f16(a);
+            float16x8_t s_b = vdupq_n_f16(b);
+            int16x8_t s_step = vdupq_n_s16(step);
+
+            // multiply rotation
+            float16x8_t v_xa = vmulq_f16(v_x, s_a);
+            float16x8_t v_xb = vmulq_f16(v_x, s_b);
+            float16x8_t v_ya = vmulq_f16(v_y, s_a);
+            float16x8_t v_yb = vmulq_f16(v_y, s_b);
+
+            // sum
+            float16x8_t v_xb_plus_ya = vaddq_f16(v_xb, v_ya);
+            float16x8_t v_xa_minus_yb = vsubq_f16(v_xa, v_yb);
+
+            //round and get offset
+            v_xb_plus_ya = vrndiq_f16(v_xb_plus_ya);
+            v_xa_minus_yb = vrndiq_f16(v_xa_minus_yb);
+
+            int16x8_t v_y_s16 = vmulq_s16(vcvtq_s16_f16(v_xb_plus_ya), s_step);
+            int16x8_t v_x_s16 = vcvtq_s16_f16(v_xa_minus_yb);
+            int16x8_t voffset = vaddq_s16(v_y_s16, v_x_s16);
+
+            // get values
+            for(int i = 0; i < 4; i++)
+            {
+                outputA[output_offset + i] = center[voffset[2*i]];
+                outputB[output_offset + i] = center[voffset[2*i + 1]];
+            }
+        };
+
+        for (int i = 0; i < 32; ++i)
+        {
+            uint8x8_t valuesA, valuesB;
+            calculateHalfByte(i, 0, valuesA, valuesB);
+            px+=8; py+=8;
+            calculateHalfByte(i, 4, valuesA, valuesB);
+            px+=8; py+=8;
+
+            // compare values
+            uint8x8_t cmp = vclt_u8(valuesA, valuesB);
+
+            // pack
+            uint8_t mask = 0x0;
+            for(int i = 0; i < 8; i++)
+            {
+                mask |= (vget_lane_u8(cmp, i) & (1 << i));
+            }
+
+            desc[i] = mask;
+        }
     }
 
 
@@ -1079,8 +1168,58 @@ namespace ORB_SLAM3
     {
         descriptors = Mat::zeros((int)keypoints.size(), 32, CV_8UC1);
 
+        static std::vector<__fp16> patternx = [&](){
+            std::vector<__fp16> out;
+            for (size_t i = 0; i < pattern.size(); i++)
+                out.push_back(pattern[i].x);
+            return out;
+        }();
+
+        static std::vector<__fp16> patterny = [&](){
+            std::vector<__fp16> out;
+            for (size_t i = 0; i < pattern.size(); i++)
+                out.push_back(pattern[i].y);
+            return out;
+        }();
+
+        const int thread_count = 4;
+        std::thread threads[thread_count];
+
+        const int step = (int)keypoints.size() / thread_count;
+
+#if USE_THREADED_ORB
+        for (int i = 0; i < thread_count; i++)
+        {
+            threads[i] = std::thread([&, i](){
+                const int start = i * step;
+                const int end = (i == thread_count - 1) ? (int)keypoints.size() : start + step;
+
+                for (int j = start; j < end; j++)
+                {
+#if  USE_NEON_ORB
+                    computeOrbDescriptorNEON(keypoints[j], image, patternx, patterny, descriptors.ptr((int)j));
+#else
+                    computeOrbDescriptor(keypoints[j], image, &pattern[0], descriptors.ptr((int)j));
+#endif
+                }
+            });
+        }
+
+        for (int i = 0; i < thread_count; i++)
+            threads[i].join();
+#else
+
+
         for (size_t i = 0; i < keypoints.size(); i++)
+        {
+#if  USE_NEON_ORB
+            computeOrbDescriptorNEON(keypoints[i], image, patternx, patterny, descriptors.ptr((int)i));
+#else
             computeOrbDescriptor(keypoints[i], image, &pattern[0], descriptors.ptr((int)i));
+#endif
+        }
+
+#endif
     }
 
     int ORBextractor::operator()( InputArray _image, InputArray _mask, vector<KeyPoint>& _keypoints,
