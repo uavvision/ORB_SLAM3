@@ -67,7 +67,7 @@
 
 
 #define USE_NEON_ORB 1
-#define USE_THREADED_ORB 1
+#define USE_THREADED_ORB 0
 
 using namespace cv;
 using namespace std;
