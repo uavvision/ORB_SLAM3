@@ -890,6 +890,34 @@ void System::SaveTrajectoryEuRoC(const string &filename, Map* pMap)
     cout << endl << "End of saving trajectory to " << filename << " ..." << endl;
 }
 
+
+void System::SaveAtlas(string const& filename)
+{
+    auto const keyFrames = mpAtlas->GetAllKeyFrames();
+    std::ofstream fstr(filename);
+
+    fstr << "Key Frames:\n";
+    fstr << keyFrames.size() << std::endl;
+    for (auto const& keyFrame : keyFrames)
+    {
+        auto const rotation = keyFrame->GetRotation();
+        auto const quaternion = Converter::toQuaternion(Converter::toCvMat(rotation));
+        auto const translation = keyFrame->GetTranslation();
+        fstr << keyFrame->mTimeStamp << " ";
+        fstr << quaternion[0] << " " << quaternion[1] << " " << quaternion[2] << " " << quaternion[3] << " ";
+        fstr << translation[0] << " " << translation[1] << " " << translation[2] << std::endl;
+    }
+
+    fstr << "PointCloud:\n";
+    auto const& mapPoints = mpAtlas->GetAllMapPoints();
+    fstr << mapPoints.size() << std::endl;
+    for (auto const& mapPoint : mapPoints)
+    {
+        auto const position = mapPoint->GetWorldPos();
+        fstr << position[0] << " " << position[1] << " " << position[2] << std::endl;
+    }
+}
+
 /*void System::SaveTrajectoryEuRoC(const string &filename)
 {
 
